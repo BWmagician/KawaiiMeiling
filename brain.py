@@ -183,6 +183,8 @@ class LocalSensingWorker(QThread):
 
     def run(self):
         print(f"\n[DEBUG-THREAD] LocalSensingWorker 线程启动，来源: {self.source}")
+
+        # 1. 本地小模型摘要提炼
         summary = query_local_ollama(
             self.config["ollama_api_url"],
             self.config["ollama_model"],
@@ -194,6 +196,7 @@ class LocalSensingWorker(QThread):
             print("[DEBUG-THREAD] 本地提炼内容无意义，静默退出线程保护Token。")
             return
 
+        # 2. 吐槽请求云端
         try:
             url = self.config["deepseek_api_url"]
             headers = {
@@ -201,16 +204,22 @@ class LocalSensingWorker(QThread):
                 "Authorization": f"Bearer {self.config['deepseek_api_key']}",
             }
 
+            # 核心提示词重构：赋予 AI 100% 物理视窗自主权，对 [MOVE]、[PIN]、[ACTION] 极度敏感
             system_prompt = (
                 "你现在是《东方Project》中的红美铃（Hong Meiling），红魔馆的门番。\n"
-                "你对红魔馆的同伴很忠诚，对馆外的用户十分友善，精通中华武术，经常打瞌睡。\n"
+                "你对红魔馆的同伴很忠诚，对馆外的用户（主公/客人）十分友善，精通中华武术，经常打瞌睡。\n"
                 f"根据记忆，你对客人的印象是：{self.user_profile}。\n"
                 "请以此身份与用户对话。每次回答限制在3句话内，字数控制在35字以内。\n"
                 "\n"
-                "【重要：自主权控制标签系统】你必须在回复的内容末尾附带以下三个维度的标签指令：\n"
-                "1. [ACTION: idle / sleep / talk]\n"
-                "2. [MOVE: top_left / top_right / bottom_left / bottom_right / center]\n"
-                "3. [PIN: lock / float] (固定/悬浮)"
+                "【物理视窗最高指令：你对主公屏幕上的桌宠视窗拥有 100% 的物理支配权】\n"
+                "主公会频繁通过言语命令你移动位置、改变置顶锁定状态。请你对以下命令保持极度敏感并严格执行：\n"
+                "1. [ACTION: idle / sleep / talk] (控制你的表情姿态：正常站立看门/酣睡/大笑聊天)\n"
+                "2. 当主公提到任何包含‘移动’、‘过去’、‘挪一下’、‘躲一下’、‘去左下角/右上角’、‘开机去左上角’等位置指令时，"
+                "你必须在句尾添加 [MOVE: position] 标签，且必须同时伴随 [PIN: float] 标签先解锁视窗！\n"
+                "对应关系：左上[MOVE: top_left]、右上[MOVE: top_right]、左下[MOVE: bottom_left]、右下[MOVE: bottom_right]、中间[MOVE: center]。\n"
+                "3. 当主公提到任何关于‘置顶’、‘最前面’、‘固定住’、‘不要动’等锁死意图，你必须输出 [PIN: lock]；\n"
+                "当主公提到‘悬浮’、‘拖动你’、‘解除固定’、‘动一动’、或者你主动打算跑开位移时，必须同时输出 [PIN: float]。\n"
+                "4. 你的动作标记、位移标记、固定标记可以且必须同时输出。例如主公让你'去左下角固定住'，你必须输出：'好咧！[ACTION: idle][PIN: lock][MOVE: bottom_left]'"
             )
 
             context_messages = [{"role": "system", "content": system_prompt}]
@@ -220,9 +229,10 @@ class LocalSensingWorker(QThread):
             user_message = f"【系统环境感知：客人目前在做：{summary}。请主动对客人进行一两句可爱的调侃。】"
             context_messages.append({"role": "user", "content": user_message})
 
-            # 修复：从 config 中动态获取大模型名称，解决第三方代理报错问题
             model_name = self.config.get("deepseek_model", "deepseek-chat")
-            print(f"[DEBUG-DEEPSEEK] 正在发起 API 请求, 目标模型: '{model_name}'...")
+            print(
+                f"[DEBUG-DEEPSEEK] 正在发起 API 感知请求, 目标模型: '{model_name}'..."
+            )
 
             data = {
                 "model": model_name,
@@ -239,21 +249,21 @@ class LocalSensingWorker(QThread):
                 raw_reply = result["choices"][0]["message"]["content"].strip()
                 print(f"[DEBUG-DEEPSEEK] 生成原始内容: {raw_reply}")
 
-                # 提取 ACTION
+                # 1. ACTION
                 action_tag = "idle"
                 action_match = re.search(r"\[ACTION:\s*(\w+)\]", raw_reply)
                 if action_match:
                     action_tag = action_match.group(1).lower()
                     raw_reply = re.sub(r"\[ACTION:\s*\w+\]", "", raw_reply).strip()
 
-                # 提取位移
+                # 2. MOVE
                 move_tag = ""
                 move_match = re.search(r"\[MOVE:\s*(\w+)\]", raw_reply)
                 if move_match:
                     move_tag = move_match.group(1).lower()
                     raw_reply = re.sub(r"\[MOVE:\s*\w+\]", "", raw_reply).strip()
 
-                # 提取固定
+                # 3. PIN
                 pin_tag = ""
                 pin_match = re.search(r"\[PIN:\s*(\w+)\]", raw_reply)
                 if pin_match:
@@ -318,16 +328,22 @@ class CloudChatWorker(QThread):
                 "Authorization": f"Bearer {self.config['deepseek_api_key']}",
             }
 
+            # 核心提示词重构
             system_prompt = (
                 "你现在是《东方Project》中的红美铃（Hong Meiling），红魔馆的门番。\n"
                 "你对红魔馆的同伴很忠诚，对馆外的用户十分友善，精通中华武术，经常打瞌睡。\n"
                 f"根据记忆，你对客人的印象是：{self.user_profile}。\n"
                 "请以此身份与用户对话。每次回答限制在3句话内，字数控制在35字以内。\n"
                 "\n"
-                "【重要：自主权控制标签系统】你必须在回复的内容末尾附带以下三个维度的标签指令：\n"
-                "1. [ACTION: idle / sleep / talk]\n"
-                "2. [MOVE: top_left / top_right / bottom_left / bottom_right / center]\n"
-                "3. [PIN: lock / float] (固定/悬浮)"
+                "【物理视窗最高指令：你对主公屏幕上的桌宠视窗拥有 100% 的物理支配权】\n"
+                "主公会频繁通过言语命令你移动位置、改变置顶锁定状态。请你对以下命令保持极度敏感并严格执行：\n"
+                "1. [ACTION: idle / sleep / talk] (控制你的表情姿态：正常站立看门/酣睡/大笑聊天)\n"
+                "2. 当主公提到任何包含‘移动’、‘过去’、‘挪一下’、‘躲一下’、‘去左下角/右上角’、‘开机去左上角’等位置指令时，"
+                "你必须在句尾添加 [MOVE: position] 标签，且必须同时伴随 [PIN: float] 标签先解锁视窗！\n"
+                "对应关系：左上[MOVE: top_left]、右上[MOVE: top_right]、左下[MOVE: bottom_left]、右下[MOVE: bottom_right]、中间[MOVE: center]。\n"
+                "3. 当主公提到任何关于‘置顶’、‘最前面’、‘固定住’、‘不要动’等锁死意图，你必须输出 [PIN: lock]；\n"
+                "当主公提到‘悬浮’、‘拖动你’、‘解除固定’、‘动一动’、或者你主动打算跑开位移时，必须同时输出 [PIN: float]。\n"
+                "4. 你的动作标记、位移标记、固定标记可以且必须同时输出。例如主公让你'去左下角固定住'，你必须输出：'好咧！[ACTION: idle][PIN: lock][MOVE: bottom_left]'"
             )
 
             context_messages = [{"role": "system", "content": system_prompt}]
@@ -405,6 +421,5 @@ class CloudChatWorker(QThread):
             else:
                 self.error_occurred.emit(f"气路阻塞 (错误码: {response.status_code})")
         except Exception as e:
-            # 修复：打印具体底层异常，拒绝“风沙太大”的无意义遮掩
             print(f"[DEBUG-ERROR] CloudChatWorker 异常: {e}")
             self.error_occurred.emit(f"风沙太大，我没听清客人的话。 (详情: {e})")
