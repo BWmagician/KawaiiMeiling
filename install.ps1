@@ -18,17 +18,16 @@ if (Get-Command python -ErrorAction SilentlyContinue) {
 
 if ($PythonCmd -eq "") {
     Write-Host "【错误】未在您的系统中检测到任何 Python 环境！" -ForegroundColor Red
-    Write-Host "请前往 Python 官网下载并安装：https://www.python.org/downloads/" -ForegroundColor Yellow
-    Write-Host "安装时请务必勾选底部的 'Add python.exe to PATH' 选项喵！" -ForegroundColor Yellow
+    Write-Host "请先前往 Python 官网下载并安装：https://www.python.org/downloads/" -ForegroundColor Yellow
     Read-Host "按回车退出..."
     exit
 }
 
 # 3. 差异化部署策略
 if ($IsWindows -or $env:OS -like "*Windows*") {
-    # Windows 平台：直接进行全局安装，完美避开 Python 3.13 首次创建 venv 时 ensurepip 挂死挂起的 Bug！
-    Write-Host "检测到 Windows 平台，正在直接为您部署核心运行库 (PyQt5, requests)..." -ForegroundColor Cyan
-    & $PythonCmd -m pip install requests PyQt5 -i https://pypi.tuna.tsinghua.edu.cn/simple --user
+    # Windows 平台：直接进行全局安装
+    Write-Host "检测到 Windows 平台，正在直接为您部署核心运行库 (PyQt5, requests, duckduckgo_search)..." -ForegroundColor Cyan
+    & $PythonCmd -m pip install requests PyQt5 duckduckgo_search -i https://pypi.tuna.tsinghua.edu.cn/simple --user
 } else {
     # macOS 平台：依然保持隔离的 .venv 沙箱，避开系统 PEP 668 限制
     Write-Host "检测到 macOS 平台，正在为您创建隔离虚拟环境..." -ForegroundColor Cyan
@@ -36,19 +35,20 @@ if ($IsWindows -or $env:OS -like "*Windows*") {
         & $PythonCmd -m venv .venv
     }
     $LocalPip = "./.venv/bin/pip"
-    & $LocalPip install requests PyQt5 -i https://pypi.tuna.tsinghua.edu.cn/simple
+    & $LocalPip install requests PyQt5 duckduckgo_search -i https://pypi.tuna.tsinghua.edu.cn/simple
 }
 
 Write-Host ""
 Write-Host "-----------------------------------------" -ForegroundColor DarkYellow
 Write-Host "正在检测本地 Ollama 环境..." -ForegroundColor Cyan
 
-# 4. 检测并拉取 0.5B 本地小模型
+# 4. 检测并自动拉取高素质的 gemma4:latest 大模型
 $OllamaCheck = Get-Command ollama -ErrorAction SilentlyContinue
 if ($OllamaCheck) {
-    Write-Host "检测到本地已安装 Ollama，正在为您自动拉取 0.5B 决策小模型..." -ForegroundColor Green
-    ollama pull qwen2.5:0.5b
-    Write-Host "模型拉取完成！" -ForegroundColor Green
+    # 核心修改：已同步更改为拉取 gemma4:latest 大模型
+    Write-Host "检测到本地已安装 Ollama，正在为您自动拉取 gemma4:latest 大模型..." -ForegroundColor Green
+    ollama pull gemma4:latest
+    Write-Host "Gemma4 模型拉取完成！" -ForegroundColor Green
 } else {
     Write-Host "【提示】未检测到 Ollama 命令行工具。请至官网 https://ollama.com 下载。" -ForegroundColor Yellow
 }
