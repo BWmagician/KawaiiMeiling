@@ -16,7 +16,10 @@ from PyQt5.QtCore import (
     QTimer,
     QPropertyAnimation,
     QEasingCurve,
+    pyqtSignal,
 )
+
+#  QtWidgets 导入中已包含 QPushButton 声明与强悍的 QDesktopWidget 引用
 from PyQt5.QtWidgets import (
     QApplication,
     QWidget,
@@ -26,7 +29,7 @@ from PyQt5.QtWidgets import (
     QGraphicsOpacityEffect,
     QPushButton,
 )
-from PyQt5.QtGui import QPixmap, QIcon
+from PyQt5.QtGui import QPixmap, QCursor, QKeyEvent, QIcon
 
 # 引入大脑模块以及新增的 HTTP 接收服务
 from brain import (
@@ -49,7 +52,7 @@ class MeilingPet(QWidget):
         self.load_memory_data()
         self.init_ui()
 
-        # 2. 开机待机设定（直接初始化在睡觉姿态，不显示空白气泡）
+        # 2. 开机待机设定：直接初始化在睡觉姿态，不显示空白气泡
         self.character_state = "sleeping"
         self.set_mascot_image(self.img_action4)
 
@@ -57,7 +60,7 @@ class MeilingPet(QWidget):
         self.init_timers()
         self.setup_autostart()
 
-        # 4. 启动本地 10 秒开机待机呼吸文本动画（优雅向主公反馈后台加载进度，拒绝 443 报错）
+        # 4. 启动本地 10 秒开机待机呼吸文本动画（自适应，避开开机断网）
         self.start_startup_standby_animation()
 
         # 5. 延迟开机主动问候时钟：动态读取外部延迟时间（默认10秒），转换为毫秒触发
@@ -82,7 +85,8 @@ class MeilingPet(QWidget):
             "deepseek_api_url": "https://api.deepseek.com/chat/completions",
             "deepseek_model": "deepseek-chat",
             "ollama_api_url": "http://localhost:11434/api/generate",
-            "ollama_model": "qwen2.5:1.5b",
+            "ollama_model": "gemma4:latest",
+            "vlm_model": "llava:latest",  # 视觉大模型支持
             "idle_sleep_timeout_seconds": 120,
             "cooldown_seconds": 10,
             "startup_delay_seconds": 10,
@@ -211,6 +215,9 @@ class MeilingPet(QWidget):
         self.last_clipboard_text = ""
         self.last_comment_time = 0
         self.temp_unpin_needed = False
+
+        # 物理防抢跑生命周期保护
+        self.opacity_effect = None
 
     def init_ui(self):
         self.setFixedSize(280, 360)
@@ -371,7 +378,9 @@ class MeilingPet(QWidget):
         """物理呼吸动效：在开机初始化网络延迟的10秒内，美铃保持action4酣睡，气泡进行有节律的Zzz跳动"""
         self.dialogue_state = "typing"  # 借用typing状态拦截气泡自动淡出
         self.bubble.show()
-        self.opacity_effect.setOpacity(1.0)
+        # 安全加固：增加安全性检验，防止 QThread 抢跑导致 NoneType 的闪退
+        if self.opacity_effect:
+            self.opacity_effect.setOpacity(1.0)
 
         self.standby_step = 0
         self.startup_anim_timer = QTimer(self)
@@ -408,7 +417,7 @@ class MeilingPet(QWidget):
 
             pos_name = self.config.get("startup_position", "bottom_right")
             if pos_name in targets:
-                # 修复：移除错误的未定义变量 corner_name，统一重构为自适应落位参数 pos_name
+                # 修复并彻底删除残留的未定义变量 corner_name
                 tx, ty = targets[pos_name]
                 self.move(tx, ty)
                 self.debug_print(f"[DEBUG-SYSTEM] 已执行开机物理初始落位: '{pos_name}'")
@@ -497,7 +506,7 @@ class MeilingPet(QWidget):
                     if os.path.exists(target_bat):
                         os.remove(target_bat)
                         self.debug_print(
-                            "[DEBUG-SYSTEM] 用户关闭了自启动，已自动清理 Windows 开机自启项"
+                            "[DEBUG-SYSTEM] 用户关闭了自启动，已自动清理 Windows 开机自启动 bat"
                         )
         except Exception as e:
             self.debug_print(f"[DEBUG-ERROR] 配置自启动发生异常: {e}")
@@ -540,11 +549,45 @@ class MeilingPet(QWidget):
         self.worker.error_occurred.connect(self.on_api_error)
         self.worker.start()
 
+    # ==================== 主动拍照截图观摩（主动视觉功能） ====================
+    def trigger_active_snapshot(self):
+        """主动拍照观摩：0 毫秒捕获当前前台活动画面，保存为 temp_snapshot.jpg，交由本地 VLM 进行视觉吐槽"""
+        self.last_interaction_time = time.time()  # 拍照属于主动交互
+        self.show_dialogue_list(["（美铃真气汇聚双眼，正在专注观摩主公当前的屏幕……）"])
+
+        try:
+            screen = QApplication.primaryScreen()
+            # 核心修复（Mac 物理截图指针安全防闪退）：
+            # 放弃不稳定的裸 0 句柄（Mac下会段错误崩溃），改为读取 QDesktopWidget 的原生 winId
+            pixmap = screen.grabWindow(QApplication.desktop().winId())
+            snapshot_path = os.path.join(self.base_path, "temp_snapshot.jpg")
+            pixmap.save(snapshot_path, "JPG", 85)  # 以高压缩比保存为临时图片
+            self.debug_print("[DEBUG-UI] 物理截图保存成功！正在启动本地 VLM 线程...")
+
+            # 抢占式线程终止：强行关掉后台已有的感知线程
+            if hasattr(self, "sensing_worker") and self.sensing_worker.isRunning():
+                self.sensing_worker.terminate()
+                self.sensing_worker.wait()
+
+            # 开启主动拍照识别线程，source="snapshot"
+            self.sensing_worker = LocalSensingWorker(
+                self.config,
+                "[主动观摩命令]",
+                self.memory_data["conversation_history"],
+                self.memory_data["user_profile"],
+                source="snapshot",
+            )
+            self.sensing_worker.response_received.connect(self.on_api_success)
+            self.sensing_worker.start()
+        except Exception as e:
+            self.debug_print(f"[DEBUG-ERROR] 物理主动拍照失败: {e}")
+
     def on_clipboard_changed(self):
         if self.character_state == "sleeping":
             return
 
         text = QApplication.clipboard().text().strip()
+        # 语法纠正
         if not text or text == self.last_clipboard_text:
             return
 
@@ -578,8 +621,13 @@ class MeilingPet(QWidget):
             )
             return
 
+        # 核心重构（抢占式线程终止）
         if hasattr(self, "sensing_worker") and self.sensing_worker.isRunning():
-            return
+            print(
+                "[DEBUG-UI] 侦测到主公最新的操作！正在一毫秒内强行终止旧的感知线程..."
+            )
+            self.sensing_worker.terminate()
+            self.sensing_worker.wait()
 
         self.last_comment_time = now
 
@@ -593,10 +641,9 @@ class MeilingPet(QWidget):
         self.sensing_worker.response_received.connect(self.on_api_success)
         self.sensing_worker.start()
 
-    def on_web_content_received(self, title, content):
-        if self.character_state == "sleeping":
-            return
-
+    def on_web_content_received(
+        self, title, content, image_url
+    ):  # 同步大脑层最新的 3 参数接口
         now = time.time()
         # 冷却
         cooldown = self.config.get("cooldown_seconds", 10)
@@ -627,8 +674,13 @@ class MeilingPet(QWidget):
             )
             return
 
+        # 核心重构（抢占式线程终止）
         if hasattr(self, "sensing_worker") and self.sensing_worker.isRunning():
-            return
+            print(
+                "[DEBUG-UI] 侦测到主公最新的操作！正在一毫秒内强行终止旧的感知线程..."
+            )
+            self.sensing_worker.terminate()
+            self.sensing_worker.wait()
 
         self.last_comment_time = now
 
@@ -638,6 +690,7 @@ class MeilingPet(QWidget):
             self.memory_data["conversation_history"],
             self.memory_data["user_profile"],
             source="browser",
+            image_url=image_url,
         )
         self.sensing_worker.response_received.connect(self.on_api_success)
         self.sensing_worker.start()
@@ -690,6 +743,7 @@ class MeilingPet(QWidget):
             self.debug_print(f"[DEBUG-ERROR] 物理位置跑动失败: {e}")
 
     def on_movement_finished(self):
+        # 核心：运动滑行结束后，强制执行姿态判定重置，保证美铃完美缩回 action4 酣睡！
         if self.temp_unpin_needed:
             self.setWindowFlags(
                 Qt.FramelessWindowHint | Qt.WindowStaysOnTopHint | Qt.Tool
@@ -698,6 +752,11 @@ class MeilingPet(QWidget):
                 self.setAttribute(Qt.WA_MacAlwaysShowToolWindow, True)
             self.show()
             self.temp_unpin_needed = False
+
+        if self.character_state == "sleeping":
+            self.set_mascot_image(self.img_action4)
+        else:
+            self.set_mascot_image(self.img_action1)
 
     def evade_active_window(self):
         app, bounds_str = get_frontmost_app_info()
@@ -760,7 +819,8 @@ class MeilingPet(QWidget):
             self.apply_pin_ui_and_flags()
 
     def toggle_pin(self):
-        self.set_pinned_state(not self.is_pinned)
+        """核心修复（单次异步重新置顶机制）"""
+        QTimer.singleShot(0, lambda: self.set_pinned_state(not self.is_pinned))
 
     def apply_pin_ui_and_flags(self):
         current_pos = self.pos()
@@ -899,6 +959,8 @@ class MeilingPet(QWidget):
         self.show_dialogue_list(self.parse_sentences(random.choice(responses)))
 
     def contextMenuEvent(self, event):
+        # 核心：将“置顶/浮动切换”和“历史记录日志（交往日志）”、“照相（看招！）”收纳进右键选单，极简整洁！
+        # 修复：去除了右键菜单中的“视窗固定/浮动切换”冗余选项，完全交由底部主按钮和大模型自主决策控制！
         menu = QMenu(self)
         menu.setStyleSheet("""
             QMenu {
@@ -923,6 +985,11 @@ class MeilingPet(QWidget):
 
         feed_action = menu.addAction("送中华甜点")
         care_action = menu.addAction("红魔馆例行巡逻")
+
+        # 将照相按键加入右键功能区，大隐隐于市！
+        snap_action = menu.addAction("请美铃观摩屏幕（照相）")
+
+        hist_action = menu.addAction("翻阅往来日志")
         status_action = menu.addAction("红美铃状态记录")
         exit_action = menu.addAction("让美铃去守门")
 
@@ -931,6 +998,10 @@ class MeilingPet(QWidget):
             self.feed_meiling()
         elif action == care_action:
             self.daily_care()
+        elif action == snap_action:
+            self.trigger_active_snapshot()
+        elif action == hist_action:
+            self.open_history_window()
         elif action == status_action:
             self.show_status()
         elif action == exit_action:
@@ -944,7 +1015,7 @@ class MeilingPet(QWidget):
         self.last_interaction_time = time.time()
         responses = [
             "哇，是乌龙茶和天津甘栗！多谢客人，值班顿时不困了！",
-            "唔！这个豆沙包甜度正好，客人的手艺真棒！",
+            "唔！这个豆沙包甜度真正好，客人的手艺真棒！",
         ]
         self.show_dialogue_list(random.choice(responses).split(" "))
 
@@ -1105,6 +1176,37 @@ class MeilingPet(QWidget):
             self.set_pinned_state(True)
             self.debug_print("[DEBUG-LOCAL] 侦测到物理固定指令，本地直接无感知锁定置顶")
 
+        # ==================== 0ms 本地双轨即时控制 ====================
+        try:
+            from app_connectors import trigger_media_action, request_netease_song
+
+            if any(kw in text_lower for kw in ["切歌", "下一首", "换首歌", "换一首"]):
+                trigger_media_action("next")
+                self.debug_print("[DEBUG-LOCAL] 侦测到物理切歌指令，本地直接执行下一首")
+            elif any(kw in text_lower for kw in ["上一首", "倒回去", "前一首"]):
+                trigger_media_action("prev")
+                self.debug_print(
+                    "[DEBUG-LOCAL] 侦测到物理上一首指令，本地直接执行上一首"
+                )
+            elif any(
+                kw in text_lower
+                for kw in ["暂停", "播放", "暂停音乐", "播放音乐", "闭嘴"]
+            ):
+                trigger_media_action("play_pause")
+                self.debug_print("[DEBUG-LOCAL] 侦测到播放状态切换，本地直接执行")
+            elif any(kw in text_lower for kw in ["点歌", "我想听", "放首歌", "播放"]):
+                match = re.search(r"(点歌|我想听|放首歌|播放)\s*(.*)", text)
+                if match:
+                    song_name = match.group(2).strip()
+                    if song_name:
+                        request_netease_song(song_name)
+                        self.debug_print(
+                            f"[DEBUG-LOCAL] 侦测到物理点歌指令: '{song_name}'"
+                        )
+        except Exception as e:
+            self.debug_print(f"[DEBUG-ERROR] 本地即时工具指令拦截失败: {e}")
+        # =============================================================
+
         # ==================== 智能开机配置拦截写入 ====================
         if any(w in text_lower for w in ["开机", "启动", "以后都"]):
             matched_pos = None
@@ -1151,7 +1253,9 @@ class MeilingPet(QWidget):
         self.chat_worker.start()
 
     # ==================== 大脑回调处理 ====================
-    def on_api_success(self, reply, emotion_action, move_tag, pin_tag, updated_profile):
+    def on_api_success(
+        self, reply, emotion_action, move_tag, pin_tag, tool_tag, updated_profile
+    ):
         self.send_btn.setEnabled(True)
 
         # 1. 物理姿态重置与同步
@@ -1177,6 +1281,25 @@ class MeilingPet(QWidget):
         # 3. 解析跑动物理位移指令
         if move_tag:
             self.move_to_corner_command(move_tag)
+
+        # 4. 核心修复：解析执行大模型发来的物理工具（切歌、点歌等）指令，完成神经通道合流！
+        if tool_tag:
+            try:
+                from app_connectors import trigger_media_action, request_netease_song
+
+                if tool_tag == "next_song":
+                    trigger_media_action("next")
+                elif tool_tag == "prev_song":
+                    trigger_media_action("prev")
+                elif tool_tag == "play_pause":
+                    trigger_media_action("play_pause")
+                elif tool_tag.startswith("play_song:"):
+                    # 提取冒号后面的歌曲名字
+                    song_name = tool_tag.split("play_song:")[1].strip()
+                    if song_name:
+                        request_netease_song(song_name)
+            except Exception as e:
+                print(f"[DEBUG-ERROR] 物理工具指令执行失败: {e}")
 
         self.memory_data["user_profile"] = updated_profile
         self.memory_data["conversation_history"].append(
